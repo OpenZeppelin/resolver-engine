@@ -2,6 +2,7 @@ import { ResolverEngine } from "@openzeppelin/resolver-engine-core";
 import pathSys from "path";
 import urlSys from "url";
 import { ImportFile } from "./parsers/importparser";
+import isUrl from 'is-url';
 
 export function findImports(data: ImportFile): string[] {
   const result: string[] = [];
@@ -43,6 +44,7 @@ async function gatherDependencyTree(
   roots: string[],
   workingDir: string,
   resolver: ResolverEngine<ImportFile>,
+  getImports: (data: ImportFile) => string[] = findImports
 ): Promise<ImportTreeNode[]> {
   const result: ImportTreeNode[] = [];
   const alreadyImported = new Set();
@@ -62,7 +64,7 @@ async function gatherDependencyTree(
 
     alreadyImported.add(url);
 
-    const foundImportURIs = findImports(resolvedFile);
+    const foundImportURIs = getImports(resolvedFile);
 
     const fileNode: ImportTreeNode = { uri: file.uri, imports: [], ...resolvedFile };
 
@@ -97,6 +99,7 @@ export async function gatherSources(
   roots: string[],
   workingDir: string,
   resolver: ResolverEngine<ImportFile>,
+  getImports: (data: ImportFile) => string[] = findImports
 ): Promise<ImportFile[]> {
   const result: ImportFile[] = [];
   const queue: Array<{ cwd: string; file: string; relativeTo: string }> = [];
@@ -105,44 +108,110 @@ export async function gatherSources(
   if (workingDir !== "") {
     workingDir += "/";
   }
-  const absoluteRoots = roots.map(what => urlSys.resolve(workingDir, what));
+
+  const absoluteRoots = roots.map(what => resolvePath(workingDir, what));
   for (const absWhat of absoluteRoots) {
     queue.push({ cwd: workingDir, file: absWhat, relativeTo: workingDir });
     alreadyImported.add(absWhat);
   }
   while (queue.length > 0) {
+    // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
     const fileData = queue.shift()!;
-    const resolvedFile: ImportFile = await resolver.require(fileData.file, fileData.cwd);
-    const foundImports = findImports(resolvedFile);
+    const resolvedFile: ImportFile = await resolveImportFile(resolver, fileData);
+    const foundImports = getImports(resolvedFile);
 
     // if imported path starts with '.' we assume it's relative and return it's
     // path relative to resolved name of the file that imported it
     // if not - return the same name it was imported with
     let relativePath: string;
     if (fileData.file[0] === ".") {
-      relativePath = urlSys.resolve(fileData.relativeTo, fileData.file);
-      result.push({ url: relativePath, source: resolvedFile.source, provider: resolvedFile.provider });
+      relativePath = resolvePath(fileData.relativeTo, fileData.file);
+      result.push({
+        url: relativePath,
+        source: resolvedFile.source,
+        provider: resolvedFile.provider,
+      });
     } else {
       relativePath = fileData.file;
-      result.push({ url: relativePath, source: resolvedFile.source, provider: resolvedFile.provider });
+      result.push({
+        url: relativePath,
+        source: resolvedFile.source,
+        provider: resolvedFile.provider,
+      });
     }
 
     const fileParentDir = pathSys.dirname(resolvedFile.url);
     for (const foundImport of foundImports) {
       let importName: string;
+      // If it's relative, resolve it; otherwise, pass through
       if (foundImport[0] === ".") {
-        importName = urlSys.resolve(relativePath, foundImport);
+        importName = resolvePath(relativePath, foundImport);
       } else {
         importName = foundImport;
       }
       if (!alreadyImported.has(importName)) {
         alreadyImported.add(importName);
-        queue.push({ cwd: fileParentDir, file: foundImport, relativeTo: relativePath });
+        queue.push({
+          cwd: fileParentDir,
+          file: foundImport,
+          relativeTo: relativePath,
+        });
       }
     }
   }
 
   return result;
+}
+
+function resolvePath(workingDir: string, relativePath: string): string {
+  // If the working dir is an URL (a file imported from an URL location)
+  // or the relative path is an URL (an URL imported from a local file)
+  // use url.resolve, which will work in both cases.
+  // > url.resolve('/local/folder/', 'http://example.com/myfile.sol')
+  // 'http://example.com/myfile.sol'
+  // > url.resolve('http://example.com/', 'myfile.sol')
+  // 'http://example.com/myfile.sol'
+  //
+  // If not, use path.resolve, since using url.resolve will escape certain
+  // charaters (e.g. a space as an %20), breaking the path
+  // > url.resolve('/local/path/with spaces/', 'myfile.sol')
+  // '/local/path/with%20spaces/myfile.sol'
+  //
+  // This fixes https://github.com/Crypto-Punkers/resolver-engine/issues/176
+
+  return isUrl(workingDir) || isUrl(relativePath)
+    ? urlSys.resolve(workingDir, relativePath)
+    : pathSys.resolve(pathSys.dirname(workingDir), relativePath);
+}
+
+async function resolveImportFile(
+  resolver: ResolverEngine<ImportFile>,
+  fileData: { cwd: string; file: string; relativeTo: string },
+): Promise<ImportFile> {
+  try {
+    return await resolver.require(fileData.file, fileData.cwd);
+  } catch (err) {
+    if (err.message.startsWith('None of the sub-resolvers resolved')) {
+      // If the import failed, we retry it from the project root,
+      // in order to support `import "contracts/folder/Contract.sol";`
+      // See https://github.com/zeppelinos/zos/issues/1024
+      // TODO: This should be fixed at the resolver level, not here
+      if (fileData.cwd !== process.cwd() && fileData.file[0] !== '.') {
+        return resolveImportFile(resolver, {
+          ...fileData,
+          cwd: process.cwd(),
+        });
+      }
+      const cwd = pathSys.relative(process.cwd(), fileData.cwd);
+      const cwdDesc = cwd.length === 0 ? 'the project' : `folder ${cwd}`;
+      const relativeTo = pathSys.relative(process.cwd(), fileData.relativeTo);
+      const relativeToMsg = relativeTo.length === 0 ? process.cwd() : relativeTo;
+      err.message = `Could not find file ${
+        fileData.file
+      } in ${cwdDesc} (imported from ${relativeToMsg})`;
+    }
+    throw err;
+  }
 }
 
 /**

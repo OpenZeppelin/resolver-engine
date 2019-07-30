@@ -1,4 +1,11 @@
-export { Context, firstResult, Options, ResolverEngine, SubParser, SubResolver } from "@openzeppelin/resolver-engine-core";
+export {
+  Context,
+  firstResult,
+  Options,
+  ResolverEngine,
+  SubParser,
+  SubResolver,
+} from "@openzeppelin/resolver-engine-core";
 import { parsers as coreParsers, resolvers as coreResolvers } from "@openzeppelin/resolver-engine-core";
 import { FsParser } from "./parsers/fsparser";
 import { BacktrackFsResolver } from "./resolvers/backtrackfsresolver";

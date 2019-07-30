@@ -1,4 +1,11 @@
-export { Context, firstResult, Options, ResolverEngine, SubParser, SubResolver } from "@openzeppelin/resolver-engine-core";
+export {
+  Context,
+  firstResult,
+  Options,
+  ResolverEngine,
+  SubParser,
+  SubResolver,
+} from "@openzeppelin/resolver-engine-core";
 export {
   findImports,
   gatherSources,
